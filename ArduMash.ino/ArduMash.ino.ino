@@ -2,16 +2,16 @@
 #include <DallasTemperature.h>
 #include <LiquidCrystal.h>
 #include <SoftwareSerial.h>
+#include <EEPROM.h>
+#include <DB.h>
 
 // Temprature Probe Settings
-//#define TEMPRATURE true  // currently not used
 #define ONE_WIRE_BUS 2   // Pin the Temprature probe is attached to 
 OneWire oneWire(ONE_WIRE_BUS); // Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
 DallasTemperature sensors(&oneWire); // Pass our oneWire reference to Dallas Temperature.
-DeviceAddress insideThermometer, outsideThermometer; // arrays to hold device addresses
+DeviceAddress insideThermometer; // arrays to hold device addresses
 
 // Display Setting
-//#define DISPLAY_PRESENT true
 // initialize the library with the numbers of the interface pins
 LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 
@@ -22,12 +22,10 @@ LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 #define btnLEFT   3
 #define btnSELECT 4
 #define btnNONE   5
-int lcd_key     = 0;
-int buttonDelay = 350;
+#define buttonDelay 350
 unsigned long lastInput;
 
 // Relay Switch Settings
-//#define RELAY true
 #define RELAY_PIN 3 // Pin the relay is attached to 
 
 // Recipe Structure
@@ -39,9 +37,9 @@ struct recipeStep {
   bool          autoContinue; // User input needed, to go to the next step
   unsigned long startTime;    // filled furing execution when step is started
   byte          stepStatus;   // 0 = Initial, 1=Running, 2= Interrupted, 3=Finished.
-  char          message[17];  // To be shown when waiting for the confirmation
-};  
-recipeStep recipe[1][5];  //Shoule be one Step larger then actual used steps
+  byte          messageNo;  // To be shown when waiting for the confirmation
+} recStep;  
+recipeStep recipe[1][10];  //Shoule be one Step larger then actual used steps
 
 // ------- States -----------
 // Heating State
@@ -52,64 +50,79 @@ float tempC;
 byte currentStep = 0;
 byte currentRecipe = 0;
 
-// Meue State
-
 //System State
-// 0 = Initial Nothing Started
-// 1 = Recipe Started
-// 2 = Recipe End
-byte systemState = 0;
+#define ST_INIT    0 //Initial Nothing Started
+#define ST_RUNNING 1 // Running
+#define ST_FINISH  2 // Finished
+#define ST_WAIT    3 // Wait at step end
+byte systemState = ST_INIT;
 byte lastSystemState = -1;
+
+// DB Settings
+DB db;
+#define MY_TBL 1
 
 void setup(void)
 {
   // start serial port
   Serial.begin(9600);
   Serial.println();
-  Serial.println("ArduMash 0.1.1");
+  Serial.println(F("ArduMash 0.1.3"));
 
+  Serial.print(F("Creating Table..."));
+  db.create(MY_TBL,sizeof(recipeStep));
+  db.open(MY_TBL);
+  Serial.println(F("DONE"));
 
-  // Recipe can't be zero
+  // Recipe zero is reserved for system function
   // Recipe, Step, Temp, Duration, AutoContinue, StartTime, Status
-  recipe[0][0]  = (recipeStep){1, 0,  72.0,  0, false, 0, 0,"Einmaischen"}; // Signal zum Einmaischen, Malz zugabe bestätigen  
-  recipe[0][0]  = (recipeStep){1, 1,  68.0, 60, true,  0, 0,""}; // Maishen
-  recipe[0][1]  = (recipeStep){1, 2,  72.0,  0, false, 0, 0,"Jod Test"}; // Verzuckerungsrast, Nach Jod Test bestätigen
- // recipe[0][2]  = (recipeStep){1, 3,  78.0,  0, true,  0, 0,""}; // Enzymdeaktivierung.
- // recipe[0][3]  = (recipeStep){1, 4,   0.0,  0, false, 0, 0,"Läutern"}; // Läutern, Nach dem Läutern Bestätigen
- // recipe[0][5]  = (recipeStep){1, 5, 100.0,  0, false, 0, 0,"1. Hopfen gabe"}; // Kochen, signal für die erste Hopfengabe bestätigen
- // recipe[0][6]  = (recipeStep){1, 6, 100.0, 30, true,  0, 0,"2. Hopfen gabe"}; // Kochen, signal für die zweit Hopfengabe
- // recipe[0][7]  = (recipeStep){1, 7, 100.0, 30, true,  0, 0,""}; // Kochen, signal Whirpool und umfüllen
- // recipe[0][8]  = (recipeStep){1, 8,   0.0,  0, false, 0, 0,"Kochen Beendet"}; // Ende 
-
+  recipe[0][0]  = (recipeStep){1, 0,  72.0,  0, false, 0, 0, 7}; // Signal zum Einmaischen, Malz zugabe bestätigen  
+  recipe[0][1]  = (recipeStep){1, 1,  68.0,  60, true,  0, 0, 0}; // Maishen
+  recipe[0][2]  = (recipeStep){1, 2,  72.0,  0, false, 0, 0, 1}; // Verzuckerungsrast, Nach Jod Test bestätigen
+  recipe[0][3]  = (recipeStep){1, 3,  78.0,  0, true,  0, 0, 0}; // Enzymdeaktivierung.
+  recipe[0][4]  = (recipeStep){1, 4,   0.0,  0, false, 0, 0, 2}; // Läutern, Nach dem Läutern Bestätigen
+  recipe[0][5]  = (recipeStep){1, 5, 100.0,  0, false, 0, 0, 3}; // Kochen, signal für die erste Hopfengabe bestätigen
+  recipe[0][6]  = (recipeStep){1, 6, 100.0, 30, true,  0, 0, 4}; // Kochen, signal für die zweit Hopfengabe
+  recipe[0][7]  = (recipeStep){1, 7, 100.0, 30, true,  0, 0, 0}; // Kochen, signal Whirpool und umfüllen
+  recipe[0][8]  = (recipeStep){1, 8,   0.0,  0, false, 0, 0, 6}; // Ende 
 /*
  // Recipe, Step, Temp, Duration, AutoContinue, StartTime, Status
-  recipe[0][0]  = (recipeStep){1, 0,  72.0,  1, false, 0, 0,"Mash in"}; // Signal zum Einmaischen, Malz zugabe bestätigen  
-  recipe[0][1]  = (recipeStep){1, 1,  68.0,  1, true,  0, 0,""}; // Maishen
-  recipe[0][2]  = (recipeStep){1, 2,  72.0,  1, false, 0, 0,"1. add hops"}; // Verzuckerungsrast, Nach Jod Test bestätigen
+  recipe[0][0]  = (recipeStep){1, 0,  72.0,  1, false, 0, 0, 7}; // Signal zum Einmaischen, Malz zugabe bestätigen  
+  recipe[0][1]  = (recipeStep){1, 1,  68.0,  1, true,  0, 0, 0}; // Maishen
+  recipe[0][2]  = (recipeStep){1, 2,  72.0,  1, false, 0, 0, 3}; // Verzuckerungsrast, Nach Jod Test bestätigen
 */
 // Setup the temprature probe  
   Serial.println();
-  Serial.println("Starting Temprature Probe Steup");
-  setupTemprature();
-  Serial.println("Temprature Probe Steup DONE");
+  Serial.println(F("Starting Temprature Probe Steup"));
+  sensors.begin();
+
+// locate devices on the bus
+  Serial.print(F("Found "));
+  Serial.print(sensors.getDeviceCount(), DEC);
+  Serial.println(F(" devices."));
+
+// search for devices on the bus and assign based on an index.
+  if (!sensors.getAddress(insideThermometer, 0)) Serial.println(F("Unable to find address for Device 0"));
   
-// set the digital pin as output:
+  Serial.println(F("Temprature Probe Steup DONE"));
+  
+// set the relay digital pin as output:
   Serial.println();
-  Serial.println("Starting Relay Steup");
+  Serial.println(F("Starting Relay Steup"));
   pinMode(RELAY_PIN, OUTPUT);
-  Serial.print("Relay set to pin:");
+  Serial.print(F("Relay set to pin:"));
   Serial.println(RELAY_PIN);
-  Serial.println("Relay Steup DONE");
+  Serial.println(F("Relay Steup DONE"));
 
 // set up the LCD's number of columns and rows:
   Serial.println();
-  Serial.println("Starting Display Steup");
+  Serial.println(F("Starting Display Steup"));
   lcd.begin(16, 2);
   lcd.clear();
-  Serial.println("Display Setup DONE");
-  bootScreen();
-  delay(3000);
-  Serial.println("SETUP COMPLETE");
+  Serial.println(F("Display Setup DONE"));
+  bootScreen(); //Bullshit screen with no function
+  delay(3000);  //Everybody needs time to read the screen 
+  Serial.println(F("SETUP COMPLETE"));
   Serial.println();
 
 } // End Setup
@@ -117,74 +130,60 @@ void setup(void)
 
 void loop(void)
 {
-// Serial.print("Requesting temperatures...");
- sensors.requestTemperatures();
- tempC = sensors.getTempC(insideThermometer);
- stepController(recipe[currentRecipe][currentStep]);  
+ sensors.requestTemperatures(); //Get a new temprature reading from all sensors
+ tempC = sensors.getTempC(insideThermometer); // Update Mash Temprature
+// run through all controller
+ stepController(recipe[currentRecipe][currentStep]);
+ heaterController(recipe[currentRecipe][currentStep]);
  inputController();
  screenController(); 
- checkAlarm(insideThermometer);
 } // End Loop
 
 /////////////////////////////////////////////////////////////////////////////
-
-void startStep(byte Step) {
-  if (systemState == 2) return; // Don't start a step if system state is finished
-  
-  if (recipe[currentRecipe][Step].recipe == 0){ //Check if Recipe is finished and set system state to finished
-    systemState = 2;
-    Serial.println("Recipe 0 found, system state changed to Finished");
-    return;
-  }
-  
-  Serial.print("Starting Step:");
-  Serial.print(Step);
-  Serial.print("; Target Temp:");
-  Serial.print(recipe[currentRecipe][Step].targetTemp);
-  Serial.print("; Duration:");
-  Serial.print(recipe[currentRecipe][Step].duration);
-  Serial.print("; AutoContinue:");
-  Serial.println(recipe[currentRecipe][Step].autoContinue);
-  
-  currentStep = Step;
-  if (Step > 0) {
-    for (int i = 0; i < Step; i++) {
-      recipe[currentRecipe][i].stepStatus = 3;
-      recipe[currentRecipe][i].startTime = 0;
-    }
-  }
-  recipe[currentRecipe][currentStep].stepStatus = 1;
-  recipe[currentRecipe][currentStep].startTime = millis();
-
-  Serial.println("Setting alarm temps...");
-
-  // alarm when temp is higher than 30C
-  //sensors.setHighAlarmTemp(insideThermometer, recipe[currentRecipe][Step].targetTemp);
-
-  // alarm when temp is lower than -10C4
-  //sensors.setLowAlarmTemp(insideThermometer, recipe[currentRecipe][Step].targetTemp-0.5 );
-
-  Serial.print("New Device 0 Alarms: ");
-  //printAlarms(insideThermometer);
-  
-} // End startStep
-
-
 //------------ Controller Functions ------------------
+
+void heaterController(recipeStep Step){
+  // control the heater
+  if(Step.targetTemp < tempC ) // turn heater off
+  {
+    heatingState = false;
+  }
+  else if (Step.targetTemp > (tempC + 0.5) )
+  {
+    heatingState = true;
+  }
+  switch (systemState) {
+    //case ST_INIT:  // Commented out to turn on heat control during init phase.
+    //  break;
+    case ST_FINISH:
+      heatingState = false;
+      digitalWrite(RELAY_PIN, LOW);
+      break;
+    default: 
+      if(heatingState) {
+        digitalWrite(RELAY_PIN, HIGH);
+      }
+      else {
+        digitalWrite(RELAY_PIN, LOW);
+      }
+      break;
+  }
+}
+
 void stepController(recipeStep Step){
   byte runTime; 
 
-  if(systemState==2 or systemState == 0) return; //Recipe is done or not started no need to process steps further
+  if(systemState==ST_FINISH or systemState == ST_INIT) return; //Recipe is done or not started no need to process steps further
   
-  runTime = (millis() - Step.startTime) / 60000;
+  runTime = (millis() - Step.startTime) / 60000; // Get Runtime in Minutes
 
   // Check if end is not reached
   if(Step.duration == 0) // Means step finishes when temprature is reached. 
   {
-    if(tempC < Step.targetTemp) return; // Temprature not reached
+    if(tempC < Step.targetTemp) return; // Temprature not reached, return
   } else // Means step ends when time is reached 
   {
-    if(runTime < Step.duration) return; // Time is not up
+    if(runTime < Step.duration) return; // Time is not up, return
   }
 
   //When coming by here, the end is near
@@ -192,56 +191,38 @@ void stepController(recipeStep Step){
     startStep(currentStep +1);
     return;
   }
+
+  //When coming here, just wait.
+  systemState = ST_WAIT;
   
-  //When coming here, just wait for Select.
- /* Serial.print("Step finished:");
-  Serial.println(currentStep);
-  lcd.clear();
-  lcd.print("Step ");
-  lcd.print(currentStep);
-  lcd.print(" is done");
-  lcd.setCursor(0,1);
-  lcd.print("Press Select");*/
-  lcd.clear();
-  waitAtStepEnd();
-  Serial.println("Waiting for Confirmation");
-  while(read_LCD_buttons() != btnSELECT){
-    
-  }
-  lcd.clear();
-  startStep(currentStep +1);
 }
 
-
 void inputController() {
-  
+  byte lcd_key     = 0;
   lcd_key = read_LCD_buttons();  // read the buttons
 
-  switch(lcd_key){
-    case btnRIGHT:  Serial.print("Button Pressed: "); Serial.println("RIGHT");  break;
-    case btnUP:     Serial.print("Button Pressed: "); Serial.println("UP");     break; 
-    case btnDOWN:   Serial.print("Button Pressed: "); Serial.println("DOWN");   break; 
-    case btnLEFT:   Serial.print("Button Pressed: "); Serial.println("LEFT");   break; 
-    case btnSELECT: Serial.print("Button Pressed: "); Serial.println("SELECT"); break; 
-    case btnNONE:   break; 
-  } 
-  
   if ((millis()-lastInput) > buttonDelay) { // Only accept buttons every buttonDelay, to prevent double inputs
     switch (systemState) {
-      case 0: // Recipee and Step selections
-        if (lcd_key == btnUP)    {currentRecipe = currentRecipe + 1; lastInput = millis();}
-        if (lcd_key == btnDOWN and currentRecipe != 0)  {currentRecipe = currentRecipe - 1; lastInput = millis();}
-        if (lcd_key == btnLEFT and currentStep != 0)  {currentStep = currentStep - 1; lastInput = millis();}
-        if (lcd_key == btnRIGHT) {currentStep = currentStep + 1; lastInput = millis();}
+      case ST_INIT: // Recipee and Step selections
+        if (lcd_key == btnUP)                          {currentRecipe = currentRecipe + 1; lastInput = millis();}
+        if (lcd_key == btnDOWN and currentRecipe != 0) {currentRecipe = currentRecipe - 1; lastInput = millis();}
+        if (lcd_key == btnLEFT and currentStep != 0)   {currentStep   = currentStep   - 1; lastInput = millis();}
+        if (lcd_key == btnRIGHT)                       {currentStep   = currentStep   + 1; lastInput = millis();}
         if (lcd_key == btnSELECT)  {   //Start the processing
           startStep(currentStep);      //Start at the selected step
-          systemState = 1;             //Chaneg system state to running
+          systemState = ST_RUNNING;    //Change system state to running
           lastInput = millis();
           lcd.clear();
         } 
         break;
-      case 1:  break;
-      case 2:  break;
+      case ST_RUNNING:  break;
+      case ST_FINISH:  break;
+      case ST_WAIT:  
+        if (lcd_key == btnSELECT)  {   //Start the processing
+          startStep(currentStep +1);
+          systemState = ST_RUNNING; //running
+          break;
+        } 
       default: break;
     }
   }
@@ -253,21 +234,25 @@ void screenController() {
   if (lastSystemState != systemState){
     lcd.clear();
   }
-  
   switch (systemState) {
-    case 0:
+    case ST_INIT:
       if (lastSystemState != systemState){
-        Serial.println ("Recipe Selection Screen");
+        Serial.println (F("Recipe Selection Screen"));
       }
       initScreen();
       break;
-    case 1:
+    case ST_RUNNING:
       displayStatusScreen(insideThermometer, recipe[currentRecipe][currentStep]);
       break;
-    case 2:
+    case ST_FINISH:
       finishScreen();
       if (lastSystemState != systemState){
-        Serial.println ("Recipe Finished");
+        Serial.println (F("Recipe Finished"));
+      }
+      break;
+    case ST_WAIT:
+      if (lastSystemState != systemState){
+        waitAtStepEnd();
       }
       break;
     default: 
@@ -276,111 +261,10 @@ void screenController() {
   lastSystemState = systemState;
 } // End screenController
 
-//------------ Screens ------------------
-void waitAtStepEnd(){
-//When coming here, just wait for Select.
-  Serial.println(recipe[currentRecipe][currentStep].message);
-  lcd.print(recipe[currentRecipe][currentStep].message);
-  lcd.setCursor(0,1);
-  lcd.print("Press Select");
-}
 
-void finishScreen(){
-  lcd.setCursor(0,0);
-  lcd.print("Recipe: ");
-  lcd.print(currentRecipe);
-  lcd.setCursor(0, 1);
-  lcd.print("Finished");
-}
-
-void initScreen() {
-  //Select Recipe 
-  lcd.setCursor(0,0);
-  lcd.print("Select Recipe:");
-  lcd.setCursor(14, 0);
-  if (currentRecipe < 10) lcd.print(0);
-  lcd.print(currentRecipe);
-  lcd.setCursor(0, 1);
-  lcd.print("Select Step  :");
-  lcd.setCursor(14, 1);
-  if (currentStep < 10) lcd.print(0);
-  lcd.print(currentStep);
-} //End initScreen
-
-void displayStatusScreen(DeviceAddress deviceAddress, recipeStep Step) {
- // lcd.clear();
-  
-  // Current Temprature
-  tempC = sensors.getTempC(deviceAddress);
-  lcd.setCursor(0, 0);
-  if (tempC > 0) {
-    lcd.print(tempC);
-  }
-  else {
-    lcd.print("No Temp");
-  }
-
-  // Target Temprature
-  lcd.setCursor(0, 1);
-  lcd.print(Step.targetTemp);
-
-  // Step
-  lcd.setCursor(6, 1);
-  lcd.print("S");
-  lcd.print(Step.recipeStep);
-
-  // Auto Continue
-  lcd.setCursor(9, 1);
-  lcd.print("A:");
-  if (Step.autoContinue) {
-    lcd.print("Y");
-  }
-  else {
-    lcd.print("N");
-  }
-
-  // Heater State
-  lcd.setCursor(13, 1);
-  lcd.print("H:");
-  if (heatingState) {
-    lcd.print("Y");
-  }
-  else {
-    lcd.print("N");
-  }
-
-  //Time since Start
-  lcd.setCursor(8, 0);
-  //Seconds
-  if ((millis() - Step.startTime) / 60000 < 10) {
-    lcd.print("0");
-  }
-  lcd.print((millis() - Step.startTime) / 60000); //Print Minutes
-//  Serial.print("Time: ");
-//  Serial.print((millis() - Step.startTime) / 60000);
-  lcd.print(":");
-
-  //Seconds
-  if (((millis() - Step.startTime) / 1000) % 60 < 10) {
-    lcd.print("0");
-  }
-  lcd.print(((millis() - Step.startTime) / 1000) % 60);
-  lcd.print(" ");
-//  Serial.print(":");
-//  Serial.print(((millis() - Step.startTime) / 1000) % 60);
-  
-  if (Step.duration < 10) lcd.print("0");
-  lcd.print(Step.duration);
-} //End displayStatusScree
-
-void bootScreen(){
-  lcd.setCursor(0,0);
-  lcd.print("ArduMash 0.1.1");
-}
-
-//------------ Button Functions ------------------
+//------------  Functions ------------------
 // read the buttons
-int read_LCD_buttons()
+byte read_LCD_buttons()
 {
   int adc_key_in  = 0;
   adc_key_in = analogRead(0);      // read the value from the sensor
@@ -395,99 +279,147 @@ int read_LCD_buttons()
   return btnNONE;  // when all others fail, return this...
 } //end read_LCD_buttons
 
+// Message Class, to reduce Memory Consuption
+char* getMessage(byte messageNo){
+    switch (messageNo) {
+    case 0: return "Einmaischen";    break;
+    case 1: return "Jod Test";       break;
+    case 2: return "Laeutern";        break;
+    case 3: return "1. Hopfen gabe"; break;
+    case 4: return "2. Hopfen gabe"; break;
+    case 5: return "2. Hopfen gabe"; break;
+    case 6: return "Kochen Beendet"; break;
+    case 7: return "Einmaischen";    break;
+    case 8: break;
+    
+    default: 
+      break;
 
-//------------ Temprature Functions --------------
-void setupTemprature() {
-  // Start up the library
-  sensors.begin();
-
-  // locate devices on the bus
-  Serial.print("Found ");
-  Serial.print(sensors.getDeviceCount(), DEC);
-  Serial.println(" devices.");
-
-  // search for devices on the bus and assign based on an index.
-  if (!sensors.getAddress(insideThermometer, 0)) Serial.println("Unable to find address for Device 0");
-
-  // show the addresses we found on the bus
-  Serial.print("Device 0 Address: ");
-  printAddress(insideThermometer);
-  Serial.println();
-
-  Serial.println("Setting alarm temps...");
-
-  // alarm when temp is higher than 30C
-  sensors.setHighAlarmTemp(insideThermometer, 68);
-
-  // alarm when temp is lower than -10C
-  sensors.setLowAlarmTemp(insideThermometer, 67.5 );
-
-  Serial.print("New Device 0 Alarms: ");
-  printAlarms(insideThermometer);
-} //end setupTemprature
-
-// function to print a device address
-void printAddress(DeviceAddress deviceAddress)
-{
-  for (uint8_t i = 0; i < 8; i++)
-  {
-    if (deviceAddress[i] < 16) Serial.print("0");
-    Serial.print(deviceAddress[i], HEX);
-  }
-}//end printAddress
-
-// function to print the temperature for a device
-void printTemperature(DeviceAddress deviceAddress)
-{
-//  tempC = sensors.getTempC(deviceAddress);
-  Serial.print("Current Temp. C:");
-  Serial.println(tempC);
-} //end printTemperature
-
-
-void printAlarms(uint8_t deviceAddress[])
-{
-  char temp;
-  temp = sensors.getHighAlarmTemp(deviceAddress);
-  Serial.print("High Alarm: ");
-  Serial.print(temp, DEC);
-  Serial.print("C ");
-  Serial.print("Low Alarm: ");
-  temp = sensors.getLowAlarmTemp(deviceAddress);
-  Serial.print(temp, DEC);
-  Serial.println("C");
-} //end printAlarms
-
-// main function to print information about a device
-void printData(DeviceAddress deviceAddress)
-{
-  Serial.print("Device Address: ");
-  printAddress(deviceAddress);
-  Serial.print(" ");
-  printTemperature(deviceAddress);
-  Serial.println();
-} //end printData
-
-void checkAlarm(DeviceAddress deviceAddress)
-{
-  if (sensors.hasAlarm(deviceAddress))
-  {
-    Serial.print("ALARM: ");
-    printTemperature(deviceAddress);
-    Serial.println();
-    if (sensors.getTempC(deviceAddress) < sensors.getLowAlarmTemp(deviceAddress))
-    {
-      digitalWrite(RELAY_PIN, HIGH);
-      heatingState = true;
-      Serial.println("Heat turned on");
     }
-    else if (sensors.getTempC(deviceAddress) > sensors.getHighAlarmTemp(deviceAddress))
-    {
-      digitalWrite(RELAY_PIN, LOW);
-      heatingState = false;
-      Serial.println("Heat turned off");
+
+}
+
+void startStep(byte Step) {
+  if (systemState == ST_FINISH) return; // Don't start a step if system state is finished
+  
+  if (recipe[currentRecipe][Step].recipe == 0){ //Check if Recipe is finished and set system state to finished
+    systemState = ST_FINISH;
+    Serial.println(F("Recipe 0 found, system state changed to Finished"));
+    return;
+  }
+  
+  Serial.print(F("Starting Step:"));
+  Serial.print(Step);
+  Serial.print(F("; Target Temp:"));
+  Serial.print(recipe[currentRecipe][Step].targetTemp);
+  Serial.print(F("; Duration:"));
+  Serial.print(recipe[currentRecipe][Step].duration);
+  Serial.print(F("; AutoContinue:"));
+  Serial.println(recipe[currentRecipe][Step].autoContinue);
+  
+  currentStep = Step;
+  if (Step > 0) {
+    for (int i = 0; i < Step; i++) {
+      recipe[currentRecipe][i].stepStatus = 3;
+      recipe[currentRecipe][i].startTime = 0;
     }
   }
-} // end checkAlarm
+  recipe[currentRecipe][currentStep].stepStatus = 1;
+  recipe[currentRecipe][currentStep].startTime = millis();
+  
+} // End startStep
+
+//------------ Screens ------------------
+void waitAtStepEnd(){
+//When coming here, just wait for Select.
+  Serial.println(getMessage(recipe[currentRecipe][currentStep].messageNo));
+  lcd.print(getMessage(recipe[currentRecipe][currentStep].messageNo));
+  lcd.setCursor(0,1);
+  lcd.print(F("Press Select"));
+}
+
+void finishScreen(){
+  lcd.setCursor(0,0);
+  lcd.print(F("Recipe: "));
+  lcd.print(currentRecipe);
+  lcd.setCursor(0, 1);
+  lcd.print(F("Finished"));
+}
+
+void initScreen() {
+  //Select Recipe 
+  lcd.setCursor(0,0);
+  lcd.print(F("Select Recipe:"));
+  lcd.setCursor(14, 0);
+  if (currentRecipe < 10) lcd.print(0);
+  lcd.print(currentRecipe);
+  lcd.setCursor(0, 1);
+  lcd.print(F("Select Step  :"));
+  lcd.setCursor(14, 1);
+  if (currentStep < 10) lcd.print(0);
+  lcd.print(currentStep);
+} //End initScreen
+
+void displayStatusScreen(DeviceAddress deviceAddress, recipeStep Step) {
+  
+  // Current Temprature
+  tempC = sensors.getTempC(deviceAddress);
+  lcd.setCursor(0, 0);
+  if (tempC > 0) {
+    lcd.print(tempC);
+  }
+  else {
+    lcd.print(F("No Temp"));
+  }
+
+  // Target Temprature
+  lcd.setCursor(0, 1);
+  lcd.print(Step.targetTemp);
+
+  // Step
+  lcd.setCursor(6, 1);
+  lcd.print(F("S"));
+  lcd.print(Step.recipeStep);
+
+  // Auto Continue
+  lcd.setCursor(9, 1);
+  lcd.print(F("A:"));
+  if (Step.autoContinue) {
+    lcd.print(F("Y"));
+  }
+  else {
+    lcd.print(F("N"));
+  }
+
+  // Heater State
+  lcd.setCursor(13, 1);
+  lcd.print(F("H:"));
+  if (heatingState) {
+    lcd.print(F("Y"));
+  }
+  else {
+    lcd.print(F("N"));
+  }
+
+  //Time since Start
+  lcd.setCursor(8, 0);
+  if ((millis() - Step.startTime) / 60000 < 10) lcd.print(F("0"));       // add a 0 if less then 10 minutes
+  lcd.print((millis() - Step.startTime) / 60000);                     // Print Minutes
+  lcd.print(":");
+  if (((millis() - Step.startTime) / 1000) % 60 < 10) lcd.print(F("0")); // add a 0 if less then 10 seconds
+  lcd.print(((millis() - Step.startTime) / 1000) % 60);               // Print Seconds
+  lcd.print(" ");
+
+  // Step Duration
+  if (Step.duration < 10) lcd.print(F("0")); // add a 0 if less then 10 minutes
+  lcd.print(Step.duration);
+} //End displayStatusScree
+
+void bootScreen(){
+  lcd.setCursor(0,0);
+  lcd.print(F("ArduMash 0.1.2"));
+}
+
+
 
 
